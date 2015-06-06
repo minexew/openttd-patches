@@ -1,0 +1,1021 @@
+diff --git a/source.list b/source.list
+index 3b66ab9..317ce12 100644
+--- a/source.list
++++ b/source.list
+@@ -634,6 +634,12 @@ saveload/town_sl.cpp
+ saveload/vehicle_sl.cpp
+ saveload/waypoint_sl.cpp
+ 
++# Import
++import/fill_polygon.h
++import/fill_polygon.cpp
++import/import_csv.h
++import/import_csv.cpp
++
+ # Tables
+ table/airport_defaults.h
+ table/airport_movement.h
+diff --git a/src/console_cmds.cpp b/src/console_cmds.cpp
+index 8d9e041..5b96cc6 100644
+--- a/src/console_cmds.cpp
++++ b/src/console_cmds.cpp
+@@ -39,6 +39,7 @@
+ #include "engine_base.h"
+ #include "game/game.hpp"
+ #include "table/strings.h"
++#include "import/import_csv.h"
+ 
+ #include "safeguards.h"
+ 
+@@ -1882,6 +1883,26 @@ DEF_CONSOLE_CMD(ConNewGRFReload)
+ 	return true;
+ }
+ 
++DEF_CONSOLE_CMD(ConImportCSV)
++{
++	// code by Zydeco, McZapkie, minexew
++
++	if (argc == 0) {
++		IConsoleHelp("Import map and town and other object data from a CSV file in OpenTTD's base directory to found towns at the appropriate coordinates. Usage: 'import_csv <file>'");
++		IConsoleHelp("Record Format: see import_csv.txt");
++		return true;
++	}
++
++	if (_game_mode != GM_EDITOR) {
++		IConsolePrintF(CC_ERROR, "This function is only available in the scenario editor");
++		return true;
++	}
++
++	if (argc != 2) return false;
++
++	return ImportCSV(argv[1]);
++}
++
+ #ifdef _DEBUG
+ /******************
+  *  debug commands
+@@ -1936,6 +1957,7 @@ void IConsoleStdLibRegister()
+ 	IConsoleCmdRegister("list_settings",ConListSettings);
+ 	IConsoleCmdRegister("gamelog",      ConGamelogPrint);
+ 	IConsoleCmdRegister("rescan_newgrf", ConRescanNewGRF);
++	IConsoleCmdRegister("import_csv",	ConImportCSV);
+ 
+ 	IConsoleAliasRegister("dir",          "ls");
+ 	IConsoleAliasRegister("del",          "rm %+");
+diff --git a/src/import/fill_polygon.cpp b/src/import/fill_polygon.cpp
+new file mode 100644
+index 0000000..475d0a4
+--- /dev/null
++++ b/src/import/fill_polygon.cpp
+@@ -0,0 +1,89 @@
++/* $Id$ */
++
++/*
++ * This file is part of OpenTTD.
++ * OpenTTD is free software; you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, version 2.
++ * OpenTTD is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
++ * See the GNU General Public License for more details. You should have received a copy of the GNU General Public License along with OpenTTD. If not, see <http://www.gnu.org/licenses/>.
++ */
++
++/** @file fill_polygon.cpp Polygon fill routine */
++
++#include "../stdafx.h"
++#include "../map_func.h"
++#include "../tile_type.h"
++
++#include "fill_polygon.h"
++
++#include <climits>
++#include <vector>
++
++void FillPolygon(const TileIndex *tiles, size_t count, FillPolygonCallback cb)
++{
++	/* public-domain code by Darel Rex Finley, 2007 */
++
++	if (count == 0) return;
++
++	int minY = INT_MAX, maxY = INT_MIN;
++
++	for (size_t i = 0; i < count; i++) {
++		minY = (minY < (int)TileY(tiles[i]) ? minY : TileY(tiles[i]));
++		maxY = (maxY > (int)TileY(tiles[i]) ? maxY : TileY(tiles[i]));
++	}
++
++	std::vector<int> nodeX;
++	nodeX.resize(count);
++
++	int pixelX, pixelY, swap;
++	int i, j;
++
++	/* Loop through the rows of the image. */
++	for (pixelY = minY; pixelY <= maxY; pixelY++) {
++		/* Build a list of nodes. */
++		int nodes = 0;
++		j = count - 1;
++
++		for (i = 0; i < (int)count; i++) {
++			if (TileY(tiles[i]) < (double) pixelY && TileY(tiles[j]) >= (double) pixelY
++					|| TileY(tiles[j]) < (double) pixelY && TileY(tiles[i]) >= (double) pixelY) {
++				nodeX[nodes++]= (int)(TileX(tiles[i])
++						+ (pixelY - TileY(tiles[i])) / (TileY(tiles[j]) - TileY(tiles[i])) * (TileX(tiles[j]) - TileX(tiles[i])));
++			}
++
++			j = i;
++		}
++
++		/* Sort the nodes, via a simple "Bubble" sort. */
++		i = 0;
++
++		while (i < nodes - 1) {
++			if (nodeX[i] > nodeX[i + 1]) {
++				swap = nodeX[i];
++				nodeX[i] = nodeX[i + 1];
++				nodeX[i + 1] = swap;
++
++				if (i) i--;
++			}
++			else {
++				i++;
++			}
++		}
++
++		int mapSizeX = MapSizeX();
++
++		/* Fill the pixels between node pairs. */
++		for (i = 0; i < nodes; i += 2) {
++			if (nodeX[i] >= mapSizeX) break;
++			if (nodeX[i + 1] > 0) {
++				if (nodeX[i]< 0 )
++					nodeX[i] = 0;
++
++				if (nodeX[i + 1] > mapSizeX)
++					nodeX[i + 1] = mapSizeX;
++
++				for (pixelX = nodeX[i]; pixelX < nodeX[i+1]; pixelX++)
++					cb(TileXY(pixelX, pixelY));
++			}
++		}
++	}
++}
+diff --git a/src/import/fill_polygon.h b/src/import/fill_polygon.h
+new file mode 100644
+index 0000000..b4cae4e
+--- /dev/null
++++ b/src/import/fill_polygon.h
+@@ -0,0 +1,19 @@
++/* $Id$ */
++
++/*
++ * This file is part of OpenTTD.
++ * OpenTTD is free software; you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, version 2.
++ * OpenTTD is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
++ * See the GNU General Public License for more details. You should have received a copy of the GNU General Public License along with OpenTTD. If not, see <http://www.gnu.org/licenses/>.
++ */
++
++/** @file fill_polygon.h Polygon fill routine */
++
++#ifndef FILL_POLYGON_H
++#define FILL_POLYGON_H
++
++typedef void (*FillPolygonCallback)(TileIndex tile);
++
++void FillPolygon(const TileIndex *tiles, size_t count, FillPolygonCallback cb);
++
++#endif
+diff --git a/src/import/import_csv.cpp b/src/import/import_csv.cpp
+new file mode 100644
+index 0000000..e8f7f2c
+--- /dev/null
++++ b/src/import/import_csv.cpp
+@@ -0,0 +1,710 @@
++/* $Id$ */
++
++/*
++ * This file is part of OpenTTD.
++ * OpenTTD is free software; you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, version 2.
++ * OpenTTD is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
++ * See the GNU General Public License for more details. You should have received a copy of the GNU General Public License along with OpenTTD. If not, see <http://www.gnu.org/licenses/>.
++ */
++
++/** @file import_csv.cpp Implementation of CSV import functionality. */
++
++#include "../stdafx.h"
++#include "../command_func.h"
++#include "../console_func.h"
++#include "../signs_func.h"
++#include "../string_func.h"
++#include "../fileio_func.h"
++#include "../core/random_func.hpp"
++#include "../core/alloc_func.hpp"
++#include "../clear_map.h"
++#include "../water.h"
++
++#include "fill_polygon.h"
++
++#include <memory>
++#include <vector>
++
++enum RoadFlags {
++	RF_NONE             = 0x00,
++	RF_START_HALFROAD_Y = 0x01,    // The start tile in Y-dir should have only a half road
++	RF_END_HALFROAD_Y   = 0x02,    // The end tile in Y-dir should have only a half road
++	RF_DIR_Y            = 0x04,    // The direction is Y-dir
++	RF_DIR_X            = RF_NONE, // Dummy; Dir X is set when RF_DIR_Y is not set
++	RF_START_HALFROAD_X = 0x08,    // The start tile in X-dir should have only a half road
++	RF_END_HALFROAD_X   = 0x10,    // The end tile in X-dir should have only a half road
++};
++
++struct Coord {
++	double latitude, longitude;
++};
++
++class CsvImporter {
++public:
++	CsvImporter(FILE *fp, const char *filename) : fp(fp), filename(filename), line(0), have_edges(false) {}
++	~CsvImporter() { FioFCloseFile(fp); }
++
++	bool Import();
++
++protected:
++	bool IsInBounds(const Coord& location) const;
++	TileIndex LatLonToTile(const Coord& location) const;
++
++	void BuildRiver(int significance, const Coord& start, const Coord& end);
++	void BuildRoad(const Coord& start, const Coord& end);
++	bool LevelArea(TileIndex start_tile, TileIndex end_tile);
++	bool LevelLine(TileIndex start_tile, TileIndex end_tile);
++	uint MinTileHeightInArea(TileIndex start_tile, TileIndex end_tile) const;
++	bool PlaceSign(TileIndex tile, const char *buf);
++
++	bool CheckHaveEdges();
++	bool SetEdges(const char *buf);
++	void SyntaxError(const char *text);
++
++	static void BuildLakeCb(TileIndex tile);
++
++private:
++	FILE *fp;
++
++	bool have_edges;
++	Coord edges_min, edges_max, tile_size;
++	const char *filename;
++	int line;
++
++	char buf[64 * 1024];
++	std::vector<TileIndex> pathBuffer;
++};
++
++bool ImportCSV(const char *filename)
++{
++	FILE *fp = FioFOpenFile(filename, "r", SCENARIO_DIR);
++
++	if (fp == NULL) {
++		IConsolePrintF(CC_ERROR, "Could not open file %s. Are you sure you placed it in the 'scenarios' directory?", filename);
++		return true;
++	}
++
++	/* CsvImporter contains a huge buffer, so don't allocate it on the stack */
++	std::unique_ptr<CsvImporter> imp(new CsvImporter(fp, filename));
++	imp->Import();
++
++	return true;
++}
++
++void CsvImporter::BuildLakeCb(TileIndex tile)
++{
++	DoCommandP(tile, tile, WATER_CLASS_RIVER, CMD_BUILD_CANAL, NULL);
++}
++
++void CsvImporter::BuildRiver(int significance, const Coord& start, const Coord& end)
++{
++	TileIndex start_tile = LatLonToTile(start);
++	TileIndex end_tile = LatLonToTile(end);
++
++	if (IsValidTile(start_tile) && IsValidTile(end_tile)) {
++		TileIndex mid_tile = TileXY(TileX(end_tile), TileY(start_tile));
++
++		LevelLine(start_tile, mid_tile);
++		DoCommandP(start_tile, mid_tile, WATER_CLASS_RIVER, CMD_BUILD_CANAL, NULL);
++
++		LevelLine(mid_tile, end_tile);
++		DoCommandP(mid_tile, end_tile, WATER_CLASS_RIVER, CMD_BUILD_CANAL, NULL);
++	}
++}
++
++/* see also:
++	BuildRoadToolbarWindow::OnPlaceMouseUp (road_gui.cpp)
++*/
++void CsvImporter::BuildRoad(const Coord& start, const Coord& end)
++{
++	TileIndex start_tile = LatLonToTile(start);
++	TileIndex end_tile = LatLonToTile(end);
++
++	if (IsValidTile(start_tile) && IsValidTile(end_tile)) {
++		int place_road_flag = 0;
++		int roadtype = 0;
++		int one_way = 0;
++
++		if (TileX(start_tile) == TileX(end_tile)) {
++			/* "vertical" road */
++			place_road_flag = (RF_DIR_Y | RF_START_HALFROAD_Y | RF_END_HALFROAD_Y) & 0x07;
++			DoCommandP(start_tile, end_tile, place_road_flag | (roadtype << 3) | (one_way << 5),
++					CMD_BUILD_LONG_ROAD, NULL);
++		}
++		else if (TileY(start_tile) == TileY(end_tile)) {
++			/* horizontal road */
++			place_road_flag = (RF_DIR_X | RF_START_HALFROAD_X | RF_END_HALFROAD_Y) >> 3;
++			DoCommandP(start_tile, end_tile, place_road_flag | (roadtype << 3) | (one_way << 5),
++					CMD_BUILD_LONG_ROAD, NULL);
++		}
++		else {
++			/* curved road */
++			TileIndex mid_tile = TileXY(TileX(end_tile), TileY(start_tile));
++
++			place_road_flag = (RF_DIR_X | RF_START_HALFROAD_X) >> 3;
++			DoCommandP(start_tile, mid_tile, place_road_flag | (roadtype << 3) | (one_way << 5),
++					CMD_BUILD_LONG_ROAD, NULL);
++
++			place_road_flag = (RF_DIR_Y | RF_END_HALFROAD_Y) & 0x07;
++			DoCommandP(mid_tile, end_tile, place_road_flag | (roadtype << 3) | (one_way << 5),
++					CMD_BUILD_LONG_ROAD, NULL);
++		}
++	}
++}
++
++bool CsvImporter::CheckHaveEdges()
++{
++	if (!have_edges) {
++		IConsolePrintF(CC_ERROR, "Error: object specified before map edges at %s:%d", filename, line);
++		return false;
++	}
++
++	return true;
++}
++
++bool CsvImporter::IsInBounds(const Coord& location) const
++{
++	return (location.latitude > edges_min.latitude
++			&& location.latitude < edges_max.latitude
++			&& location.longitude > edges_min.longitude
++			&& location.longitude < edges_max.longitude);
++}
++
++TileIndex CsvImporter::LatLonToTile(const Coord& location) const
++{
++	if (IsInBounds(location)) {
++		int x = MapSizeX() - (location.longitude - edges_min.longitude) / tile_size.longitude;
++		int y = MapSizeY() - (location.latitude - edges_min.latitude) / tile_size.latitude;
++
++		return TileXY(x, y);
++	}
++	else
++		return INVALID_TILE;
++}
++
++bool CsvImporter::LevelArea(TileIndex start_tile, TileIndex end_tile)
++{
++	return DoCommandP(end_tile, start_tile, LM_LEVEL << 1 | 0, CMD_LEVEL_LAND /*| CMD_MSG(STR_ERROR_CAN_T_LEVEL_LAND_HERE)*/, NULL);
++}
++
++bool CsvImporter::LevelLine(TileIndex start_tile, TileIndex end_tile)
++{
++	/* Level all tiles on the specified line to its lowest point */
++
++	assert(TileX(start_tile) == TileX(end_tile) || TileY(start_tile) == TileY(end_tile));
++
++	if (TileX(end_tile) + 1 >= MapSizeX() || TileY(end_tile) + 1 >= MapSizeY())
++		return false;
++
++	end_tile = TileXY(TileX(end_tile) + 1, TileY(end_tile) + 1);
++
++	uint height = TileHeight(start_tile);
++	uint desired_height = MinTileHeightInArea(start_tile, end_tile);
++
++	while (height > desired_height) {
++		if (!DoCommandP(end_tile, start_tile, LM_LOWER << 1 | 0, CMD_LEVEL_LAND /*| CMD_MSG(STR_ERROR_CAN_T_LEVEL_LAND_HERE)*/, NULL))
++			return false;
++
++		height--;
++	}
++
++	return LevelArea(start_tile, end_tile);
++}
++
++uint CsvImporter::MinTileHeightInArea(TileIndex start_tile, TileIndex end_tile) const
++{
++	std::unique_ptr<TileIterator> iter(new OrthogonalTileIterator(start_tile, end_tile));
++	uint minh = MAX_TILE_HEIGHT;
++
++	for (; *iter != INVALID_TILE; ++(*iter)) {
++		TileIndex t = *iter;
++		uint curh = TileHeight(t);
++
++		if (curh < minh)
++			minh = curh;
++	}
++
++	return minh;
++}
++
++bool CsvImporter::PlaceSign(TileIndex tile, const char *buf)
++{
++	if (strlen(buf) == 0)
++		return true;
++
++	char *sign_text = (char*)MallocT<char>(strlen(buf) + 8);
++	seprintf(sign_text, sign_text + strlen(buf) + 7, "%s", buf);
++	bool success = DoCommandP(tile, 0, 0, CMD_PLACE_SIGN, NULL, sign_text);
++	free(sign_text);
++
++	return success;
++}
++
++bool CsvImporter::SetEdges(const char *buf)
++{
++	if (sscanf(buf, "%lg,%lg,%lg,%lg", &edges_min.latitude, &edges_min.longitude, &edges_max.latitude, &edges_max.longitude) != 4) {
++		IConsolePrintF(CC_ERROR, "Error reading edge coordinates at %s:%d", filename, line);
++		return false;
++	}
++
++	if (edges_max.latitude < edges_min.latitude || edges_max.longitude < edges_min.longitude) {
++		IConsolePrintF(CC_ERROR, "Invalid edge coordinates at %s:%d", filename, line);
++		return false;
++	}
++
++	/* Calculate longitude and latitude per tile. */
++	tile_size.longitude = (edges_max.longitude - edges_min.longitude) / MapSizeX();
++	tile_size.latitude = (edges_max.latitude - edges_min.latitude) / MapSizeY();
++
++	have_edges = true;
++	return true;
++}
++
++void CsvImporter::SyntaxError(const char *text)
++{
++	IConsolePrintF(CC_ERROR, "Syntax error at %s:%d (%s)", filename, line, text);
++}
++
++static bool MakeRiverOrCanal(TileIndex t, uint is_canal)
++{
++	char buf[512];
++
++	if (!(_settings_game.game_creation.landscape == LT_TROPIC && GetTropicZone(t) == TROPICZONE_DESERT)) {
++		switch (is_canal) {
++			case 0:
++				MakeRiver(t, Random());
++				break;
++
++			case 1:
++				return DoCommandP(t, t, 0, CMD_BUILD_CANAL, NULL, buf);
++		}
++
++		return true;
++	}
++	else
++		return false;
++}
++
++#define PARSE(expr_, error_) if (!(expr_)) { SyntaxError(error_); continue; }
++
++bool CsvImporter::Import()
++{
++	char *nbuf;
++	Coord object_loc;
++	uint object_size, read_object_layout; //town or city or object size, town layout or object type
++	bool have_probability = false;
++	bool have_id_list = false;
++	uint probability0 = 0;    //for V,0
++	uint probability1 = 0;    //for V,1
++	uint probability_ind = 0; //for industry instad of V,0
++	uint id_list[10];       //industry IDs to replace instead of V,0
++	int failed = 0, founded = 0;
++	char object_type_char;
++
++	while (fgets(buf, sizeof(buf), fp)) {
++		line++;
++		/* Skip comments and empty lines. */
++		if (buf[0] == '#' || buf[0] == '\n' || buf[0] == '\r') continue;
++
++		/* Read edge coords. */
++		/*if (!have_edges) {
++			if (!SetEdges(filename, line, buf))
++				return true;
++
++			have_edges = true;
++			continue;
++		}*/
++		/* Read three probabilities. */
++		/*else if (!have_probability) {
++			if (sscanf(buf, "%u,%u,%u", &probability0, &probability1, &probability_ind) != 3) {
++				IConsolePrintF(CC_ERROR, "Error reading probability at %s:%d", filename, line);
++				return true;
++			}
++
++			have_probability = true;
++			continue;
++		}*/
++		/* Read industry ID list */
++		/*else if (!have_id_list) {
++			if (sscanf(buf, "%u,%u,%u,%u,%u,%u,%u,%u,%u,%u", &id_list[0], &id_list[1], &id_list[2], &id_list[3], &id_list[4], &id_list[5], &id_list[6], &id_list[7], &id_list[8], &id_list[9]) != 10) {
++				IConsolePrintF(CC_ERROR, "Error reading industries ID list at %s:%d", filename, line);
++				return true;
++			}
++			have_id_list = true;
++			continue;
++		}*/
++
++		/* Replace comma after town name with NUL and advance nbuf to rest of line. */
++		nbuf = strchr(buf, ',');
++		if (nbuf == NULL) {
++			SyntaxError("expected comma");
++			return false;
++		}
++
++		*nbuf = '\0';
++		nbuf++;
++
++		/* Special commands */
++		if (buf[0] == '!') {
++			if (strcmp(buf + 1, "edges") == 0) {
++				if (!SetEdges(nbuf)) return false;
++			}
++			else if (strcmp(buf + 1, "lake") == 0) {
++				if (!CheckHaveEdges()) return false;
++
++				unsigned int numPoints;
++				int nread;
++				unsigned int i;
++
++				char *comma = strchr(nbuf, ',');		/* skip lake name for now */
++
++				PARSE(comma != NULL, "expected second comma");
++				nbuf = comma + 1;
++
++				PARSE(sscanf(nbuf, "%u%n", &numPoints, &nread) == 1, "expected numPoints after second comma");
++				nbuf += nread;
++
++				pathBuffer.resize(numPoints);
++
++				for (i = 0; i < numPoints; i++) {
++					PARSE(sscanf(nbuf, ",%lg,%lg%n", &object_loc.latitude, &object_loc.longitude, &nread) == 2, "expected latitude,longitude for each point");
++					nbuf += nread;
++
++					TileIndex tile = LatLonToTile(object_loc);
++
++					if (tile == INVALID_TILE) {
++						IConsolePrintF(CC_ERROR, "Skipping: Polygon has a point outside map boundary at %s:%d", filename, line);
++						break;
++					}
++
++					pathBuffer[i] = tile;
++				}
++
++				if (i != numPoints)
++					continue;
++
++				FillPolygon(&pathBuffer[0], numPoints, BuildLakeCb);
++			}
++			else if (strcmp(buf + 1, "river") == 0) {
++				if (!CheckHaveEdges()) return false;
++
++				Coord start, end;
++				int significance;
++
++				PARSE(sscanf(nbuf, "%d,%lg,%lg,%lg,%lg", &significance, &start.latitude, &start.longitude, &end.latitude, &end.longitude) == 5,
++						"expected !river,<significance>,<start_lat>,<start_lon>,<end_lat>,<end_lon>");
++
++				BuildRiver(significance, start, end);
++			}
++			else if (strcmp(buf + 1, "road") == 0) {
++				if (!CheckHaveEdges()) return false;
++
++				Coord start, end;
++
++				PARSE(sscanf(nbuf, "%lg,%lg,%lg,%lg", &start.latitude, &start.longitude, &end.latitude, &end.longitude) == 4,
++						"expected !road,<start_lat>,<start_lon>,<end_lat>,<end_lon>");
++
++				BuildRoad(start, end);
++			}
++			else {
++				IConsolePrintF(CC_ERROR, "Warning: unknown record type '%s' at %s:%d", buf, filename, line);
++			}
++
++			continue;
++		}
++
++		if (!CheckHaveEdges())
++			return false;
++
++		/* Scan population and coords. */
++		PARSE(sscanf(nbuf, "%c,%u,%lg,%lg,%u", &object_type_char, &object_size, &object_loc.latitude, &object_loc.longitude, &read_object_layout) == 5,
++				"expected <name>,<object_type>,<size>,<latitude>,<longitude>,<layout>");
++
++		/* Found town. */
++		TileIndex tile = LatLonToTile(object_loc);
++
++		if (tile != INVALID_TILE) {
++			/* Decide town size, probability and probing area */
++			TownSize town_size = TSZ_SMALL;
++			bool object_important = (object_size > 0);
++			bool found_town = false;
++			bool success = false;
++			uint funding_probability = 100;
++			int probing_area = 0;
++
++			switch (object_type_char) {
++				case 'L':		/* Large town */
++					found_town = true;
++					town_size = TSZ_LARGE;
++					probing_area = 3 + object_size;
++					break;
++
++				case 'M':		/* Medium town */
++					found_town = true;
++					town_size = TSZ_MEDIUM;
++					probing_area = 2 + object_size;
++					break;
++
++				case 'S':		/* Small town */
++					found_town = true;
++					town_size = TSZ_SMALL;
++					probing_area = 1 + object_size;
++					break;
++
++				case 'V': {		/* Very small town */
++					town_size = TSZ_SMALL;
++					if (object_important) {
++						funding_probability = probability1;
++					}
++					else {
++						funding_probability = probability0;
++					}
++
++					if (RandomRange(100) < funding_probability) {
++						/* in case of Very small towns (V,0) try to build industry instead, for example farm */
++						found_town = (object_important || RandomRange(100) < probability_ind);
++
++						if (!found_town) {
++							uint random_industry_id;
++							random_industry_id = id_list[RandomRange(10)];
++
++							/* build random industry choosen from ID list */
++							success = DoCommandP(tile, random_industry_id, 0, CMD_BUILD_INDUSTRY, NULL, buf);
++
++							if (success) {		/* industry instead village was founded - write sign with village name */
++								/* place some trees if lumber mill */
++								if ((random_industry_id == 25) || (random_industry_id == 3)) {
++									TileIndex tile1, tile2;
++									tile1 = TileAddWrap (tile, -1, -1);
++									tile2 = TileAddWrap (tile, -4, -3);
++
++									if (tile2 != INVALID_TILE)
++										success = DoCommandP(tile1, 3, tile2, CMD_PLANT_TREE, NULL, buf);
++								}
++								else {
++									/* place sign if not lumber mill or forest */
++									PlaceSign(tile, buf);
++								}
++							}
++						}
++
++						object_important = false;
++						probing_area = 0;
++					}
++
++					break;
++				}
++
++				case 'T':		/* build objecT (layout 0: antenna, 1: ligthouse) */
++					success = DoCommandP(tile, read_object_layout, 0, CMD_BUILD_OBJECT, NULL, buf);
++
++					if (!success || object_important) {
++						/* write sign with object name, where it failed (or write always if is important) */
++						PlaceSign(tile, buf);
++					}
++					break;
++
++				case 'N':		/* write sigN */
++					success = PlaceSign(tile, buf);
++					break;
++
++				case 'Y':		/* build industrY */
++					success = DoCommandP(tile, read_object_layout, 0, CMD_BUILD_INDUSTRY, NULL, buf);
++					probing_area = 2 * object_important;
++
++					if ((!success) && (probing_area > 0)) {	/* try to build elsewhere */
++						for (int x = -probing_area; x <= probing_area; x++) {
++							for (int y = -probing_area; y <= probing_area; y++) {
++								if (x == 0 && y == 0) continue;
++								success = DoCommandP(TILE_ADDXY(tile, x, y), read_object_layout, 0, CMD_BUILD_INDUSTRY, NULL, buf);
++								if (success) break;
++							}
++
++							if (success) break;
++						}
++					}
++
++					if (!success || object_important) {
++						/* write sign with industry name, where it failed (or write always if is important) */
++						PlaceSign(tile, buf);
++					}
++					break;
++
++				case 'F':		/* plant Forest */
++					success = DoCommandP(tile, read_object_layout, tile, CMD_PLANT_TREE, NULL, buf);
++
++					if (success && object_important) { /* plant more trees */
++						uint xc = TileX(tile);
++						uint yc = TileY(tile);
++
++						TileIndex tile1, tile2;
++						int x[2], y[2];
++
++						for (uint i = 0; i <= 1 + object_size / 4; i++) {
++							x[0] = max((int)1 , static_cast<int>(xc) - static_cast<int>(RandomRange(object_size / 2)));
++							y[0] = max((int)1 , static_cast<int>(yc) - static_cast<int>(RandomRange(object_size / 2)));
++							x[1] = min(MapMaxX(), xc + (RandomRange(object_size / 2)));
++							y[1] = min(MapMaxY(), yc + (RandomRange(object_size / 2)));
++
++							if (!(x[0] == x[1] || y[0] == y[1])) { /* no long stripes */
++								tile1 = TileXY(x[0], y[0]);
++								tile2 = TileXY(x[1], y[1]);
++
++								if ((TileHeight(tile1) < 12 + RandomRange(4)) && (TileHeight(tile2) < 12 + RandomRange(4))) {
++									/* supress trees in high mountains */
++									DoCommandP(tile1, read_object_layout, tile2, CMD_PLANT_TREE, NULL, buf);
++								}
++							}
++
++							xc = x[RandomRange(2)]; /* new center of a tree bunch */
++							yc = y[RandomRange(2)];
++						}
++					}
++					break;
++
++				case 'R': {		/* Rock */
++					success = (IsTileType(tile, MP_CLEAR) && !IsClearGround(tile, CLEAR_DESERT));
++
++					if (success) {
++						SetClearGroundDensity(tile, CLEAR_ROCKS, 3);
++
++						if (object_important) {
++							uint j = 1 + object_size;
++							TileIndex tile_new = tile;
++
++							for (uint i = 0; i < j; i++) {
++								tile_new = tile + TileOffsByDiagDir((DiagDirection)GB(Random(), 0, 2));
++
++								if (!IsTileType(tile_new, MP_CLEAR)) {
++									/* clear forest etc */
++									DoCommandP(tile_new, 0, 0, CMD_LANDSCAPE_CLEAR, NULL, buf);
++								}
++
++								if (IsTileType(tile_new, MP_CLEAR) && !IsClearGround(tile_new, CLEAR_DESERT)) {
++									tile = tile_new;
++									SetClearGroundDensity(tile, CLEAR_ROCKS, 3);
++								}
++							}
++						}
++					}
++
++					break;
++				}
++
++				case 'W': {		/* Water */
++					int referenceHeight;
++					Slope slope_tile = GetTileSlope(tile, &referenceHeight);
++					if (((IsInclinedSlope(slope_tile) && (object_size == 0)) || IsTileFlat(tile))
++							&& IsValidTile(tile)
++							&& !IsWaterTile(tile)) {
++						/* waterfalls only for object_size=0 (not for 1x1 lakes) */
++						success = MakeRiverOrCanal(tile, read_object_layout);
++					}
++					else {
++						success = false;
++					}
++
++					if (success) {
++						uint i = 0;
++						uint j = 1;	/* 0, 0 tile is already wet */
++						TileIndex tile2;
++
++						while (i <= object_size) {
++							while (j <= object_size) {
++								tile2 = TILE_ADDXY(tile, i, j);
++								if (!(!IsValidTile(tile2) ||  TileHeight(tile2) != referenceHeight || !IsTileFlat(tile2)))
++									success = MakeRiverOrCanal(tile2, read_object_layout);
++								else
++									success = false;
++
++								if (!success)
++									break;
++
++								j++;
++							}
++
++							j = 0;
++							i++;
++						}
++					}
++
++					if (!success || object_important) {
++						/* write sign with water area name, where it failed (or write always if is important) if string not empty */
++						PlaceSign(tile, buf);
++					}
++
++					break;
++				}
++
++				case 'D': {		/* Demolition! */
++					TileIndex tile2 = tile;
++					switch (read_object_layout) {
++						case 0:
++							tile2 = TILE_ADDXY(tile, object_size, object_size);	/* delete square area */
++							break;
++
++						case 1:
++							tile2 = TILE_ADDXY(tile, object_size, 0);			/* delete diamond area */
++							break;
++					}
++
++					success = DoCommandP(tile, tile2, read_object_layout, CMD_CLEAR_AREA, NULL, buf);
++
++					if (!success) {
++						PlaceSign(tile, buf);
++					}
++					break;
++				}
++			}
++
++			/* City and layout. */
++			if (found_town) {
++				TownLayout town_layout = _settings_game.economy.town_layout;
++				if (read_object_layout < 5)
++					town_layout = static_cast<TownLayout>(read_object_layout);
++
++				/* Found the town, trying tiles around it if it fails and city is important. */
++				success = DoCommandP(tile, town_size | object_important << 2 | town_layout << 3, 0, CMD_FOUND_TOWN, NULL, buf);
++
++				if ((!success) && (probing_area>0)) {
++					for (int x = -probing_area; x <= probing_area; x++) {
++						for (int y = -probing_area; y <= probing_area; y++) {
++							if (x == 0 && y == 0) continue;
++							success = DoCommandP(TILE_ADDXY(tile, x, y), town_size | object_important << 2 | town_layout << 3, 0, CMD_FOUND_TOWN, NULL, buf);
++							if (success) break;
++						}
++
++						if (success) break;
++					}
++				}
++			}
++
++			if (success) {
++				founded++;
++			} else {
++				if (!found_town) {
++					failed++;
++					IConsolePrintF(CC_ERROR, "Could not build object %s at 0x%X", buf, tile);
++				}
++				else if (funding_probability >= 100) {
++					/* Place a sign at the tile if founding fails and is important */
++				    char *sign_text = (char*)MallocT<char>(strlen(buf) + 8);
++					if (DoCommandP(tile, 0, 0, CMD_PLACE_SIGN, NULL)) {
++						seprintf(sign_text, sign_text + strlen(buf) + 7, "%s (%c%s)", buf, object_type_char, object_important ? ",C" : "");
++						DoCommandP(0, _new_sign_id, 0, CMD_RENAME_SIGN, NULL, sign_text);
++						free(sign_text);
++					}
++
++					failed++;
++					IConsolePrintF(CC_ERROR, "Could not found town %s at 0x%X", buf, tile);
++				}
++			 }
++		}
++		else {
++			IConsolePrintF(CC_ERROR, "Town/object out of bounds: %s", buf);
++		}
++	}
++
++	IConsolePrintF(CC_DEFAULT, "Founded %d towns/objects, failed to found %d", founded, failed);
++	return true;
++}
+diff --git a/src/import/import_csv.h b/src/import/import_csv.h
+new file mode 100644
+index 0000000..9054931
+--- /dev/null
++++ b/src/import/import_csv.h
+@@ -0,0 +1,17 @@
++/* $Id$ */
++
++/*
++ * This file is part of OpenTTD.
++ * OpenTTD is free software; you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, version 2.
++ * OpenTTD is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
++ * See the GNU General Public License for more details. You should have received a copy of the GNU General Public License along with OpenTTD. If not, see <http://www.gnu.org/licenses/>.
++ */
++
++/** @file import_csv.h CSV data import */
++
++#ifndef IMPORT_CSV_H
++#define IMPORT_CSV_H
++
++bool ImportCSV(const char *filename);
++
++#endif
+diff --git a/src/landscape.cpp b/src/landscape.cpp
+index d1c73fd..d5981ee 100644
+--- a/src/landscape.cpp
++++ b/src/landscape.cpp
+@@ -1046,15 +1046,42 @@ static void River_GetNeighbours(AyStar *aystar, OpenListNode *current)
+ 	}
+ }
+ 
++/** Callback to widen a river tile. */
++static bool RiverMakeWider(TileIndex tile, void *data)
++{
++	if (IsValidTile(tile) && !IsWaterTile(tile) && GetTileSlope(tile) == GetTileSlope(*(TileIndex *)data) && TileHeight(tile) == TileHeight(*(TileIndex *)data)) {
++		MakeRiver(tile, Random());
++		/* Remove desert directly around the river tile. */
++		TileIndex cur_tile = tile;
++		CircularTileSearch(&cur_tile, 5, RiverModifyDesertZone, NULL);
++	}
++	return false;
++}
++
+ /* AyStar callback when an route has been found. */
+ static void River_FoundEndNode(AyStar *aystar, OpenListNode *current)
+ {
++	/* Count river length. */
++	uint length = 0;
+ 	for (PathNode *path = &current->path; path != NULL; path = path->parent) {
++		length++;
++	}
++
++	uint cur_pos = 0;
++	uint river_tall = max(MapSizeX(), MapSizeY())/32u+14u; //scaling widening river
++	uint river_max_width = max(3u,min(river_tall/4u,9u));
++	for (PathNode *path = &current->path; path != NULL; path = path->parent, cur_pos++) {
+ 		TileIndex tile = path->node.tile;
+ 		if (!IsWaterTile(tile)) {
+ 			MakeRiver(tile, Random());
+-			/* Remove desert directly around the river tile. */
+-			CircularTileSearch(&tile, 5, RiverModifyDesertZone, NULL);
++			/* Widen river depending on how far we are away from the source. */
++			uint radius = min((length - cur_pos) / river_tall, river_max_width);
++			if (radius > 1) {
++				CircularTileSearch(&tile, radius + RandomRange(1), RiverMakeWider, (void *)&path->node.tile);
++			} else {
++				/* Remove desert directly around the river tile. */
++				CircularTileSearch(&tile, 5, RiverModifyDesertZone, NULL);
++			}
+ 		}
+ 	}
+ }
+@@ -1109,7 +1136,7 @@ static bool FlowRiver(TileIndex spring, TileIndex begin)
+ 	#define SET_MARK(x) marks.insert(x)
+ 	#define IS_MARKED(x) (marks.find(x) != marks.end())
+ 
+-	uint height = TileHeight(begin);
++	uint height = TileHeight(begin); //begin means outlet of river?
+ 	if (IsWaterTile(begin)) return DistanceManhattan(spring, begin) > _settings_game.game_creation.min_river_length;
+ 
+ 	std::set<TileIndex> marks;
+@@ -1127,8 +1154,10 @@ static bool FlowRiver(TileIndex spring, TileIndex begin)
+ 		queue.pop_front();
+ 
+ 		uint height2 = TileHeight(end);
+-		if (IsTileFlat(end) && (height2 < height || (height2 == height && IsWaterTile(end)))) {
+-			found = true;
++
++		if (IsTileFlat(end) && ((height2 < height) || (height2 == 0)))  {   //  height && IsWaterTile(end))))  && (count > _settings_game.game_creation.min_river_length)
++		/* only accept river if is long enough or at sea level */
++			found = true; //((count > _settings_game.game_creation.min_river_length) || (height2 == 0));
+ 			break;
+ 		}
+ 
+@@ -1145,7 +1174,7 @@ static bool FlowRiver(TileIndex spring, TileIndex begin)
+ 	if (found) {
+ 		/* Flow further down hill. */
+ 		found = FlowRiver(spring, end);
+-	} else if (count > 32) {
++	} else if (count > _settings_game.game_creation.min_river_length) {
+ 		/* Maybe we can make a lake. Find the Nth of the considered tiles. */
+ 		TileIndex lakeCenter = 0;
+ 		int i = RandomRange(count - 1) + 1;
+@@ -1166,7 +1195,7 @@ static bool FlowRiver(TileIndex spring, TileIndex begin)
+ 				DistanceManhattan(spring, lakeCenter) > _settings_game.game_creation.min_river_length) {
+ 			end = lakeCenter;
+ 			MakeRiver(lakeCenter, Random());
+-			uint range = RandomRange(8) + 3;
++			uint range = RandomRange(min((DistanceManhattan(spring, lakeCenter)-_settings_game.game_creation.min_river_length)+15,64)) + 15;
+ 			CircularTileSearch(&lakeCenter, range, MakeLake, &height);
+ 			/* Call the search a second time so artefacts from going circular in one direction get (mostly) hidden. */
+ 			lakeCenter = end;
+@@ -1188,7 +1217,7 @@ static void CreateRivers()
+ 	int amount = _settings_game.game_creation.amount_of_rivers;
+ 	if (amount == 0) return;
+ 
+-	uint wells = ScaleByMapSize(4 << _settings_game.game_creation.amount_of_rivers);
++	uint wells = 2 * ScaleByMapSize(4 << _settings_game.game_creation.amount_of_rivers);
+ 	SetGeneratingWorldProgress(GWP_RIVER, wells + 256 / 64); // Include the tile loop calls below.
+ 
+ 	for (; wells != 0; wells--) {
